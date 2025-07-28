@@ -94,13 +94,11 @@ st.title("⚡ Elhandel – Automatisk signal og historik")
 dato = st.date_input("📅 Vælg dato for signal", dt.date.today())
 zone = st.selectbox("Priszone", ZONER, index=0)
 
-# 📥 Hent reelle værdier
-vind, forbrug, import_mw = hent_reelle_data(dato)
-
-st.write(f"🔄 Automatisk data for {dato}:")
-st.write(f"• Vindproduktion: **{vind} MW**")
-st.write(f"• Forbrug: **{forbrug} MW**")
-st.write(f"• Import: **{import_mw} MW**")
+# 📥 Hent reelle værdier og vis som inputfelter
+vind_val, forbrug_val, import_val = hent_reelle_data(dato)
+vind = st.number_input("Vindproduktion (MW)", value=vind_val)
+forbrug = st.number_input("Forbrug (MW)", value=forbrug_val)
+import_mw = st.number_input("Import (MW)", value=import_val)
 
 # 📡 Beregn
 if st.button("📡 Beregn og log signal"):
