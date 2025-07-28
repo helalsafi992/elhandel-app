@@ -10,16 +10,17 @@ kwh_per_trade = 1000
 csv_log = "elhandel_signal_log.csv"
 
 # ----------- Hent spotpriser fra Strømligning -----------
-def hent_spotpris(dato, time, zone="DK1"):
+def hent_spotpriser(dato, zone="DK1"):
     dato_str = dato.strftime('%Y-%m-%d')
     url = f"https://stromligning.dk/api/v1/prices?start={dato_str}&end={dato_str}&zone={zone}"
     r = requests.get(url)
     if r.status_code == 200:
         data = r.json()
-        for row in data:
-            if row["HourDK"].startswith(f"{dato_str}T{time:02d}"):
-                return row["SpotPriceDKK"]
-    return None
+        df = pd.DataFrame(data)
+        df["HourDK"] = pd.to_datetime(df["HourDK"])
+        df["Hour"] = df["HourDK"].dt.hour
+        return df
+    return pd.DataFrame()
 
 # ----------- Beregn signal -----------
 def beregn_signal(vind, forbrug, import_mw):
@@ -27,18 +28,19 @@ def beregn_signal(vind, forbrug, import_mw):
     signal = residual > 2450 and import_mw < 200
     return residual, signal
 
-# ----------- Gem log -----------
-def log_dagens_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, zone):
-    spot_køb = hent_spotpris(dato, køb_tid, zone)
-    spot_salg = hent_spotpris(dato, salg_tid, zone)
-    forventet_profit = None
-    reel_profit = None
-    afvigelse = None
+# ----------- Automatisk valg af tidspunkter -----------
+def vælg_tidspunkter(df):
+    købsvindue = df[df["Hour"].isin([0,1,2,3,4,5,12,13,14])]
+    købstid = købsvindue.loc[købsvindue["SpotPriceDKK"].idxmin()]["Hour"]
+    salgstid = df.loc[df["SpotPriceDKK"].idxmax()]["Hour"]
+    spot_køb = købsvindue["SpotPriceDKK"].min()
+    spot_salg = df["SpotPriceDKK"].max()
+    return int(købstid), int(salgstid), spot_køb, spot_salg
 
-    if spot_køb and spot_salg:
-        forventet_profit = spot_salg - spot_køb
-        reel_profit = forventet_profit * kwh_per_trade
-        afvigelse = forventet_profit  # her kan du forbedre med forecast vs real
+# ----------- Gem log -----------
+def log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone):
+    forventet_profit = spot_salg - spot_køb
+    reel_profit = forventet_profit * kwh_per_trade
 
     row = {
         "Dato": dato.strftime('%Y-%m-%d'),
@@ -53,7 +55,6 @@ def log_dagens_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid
         "Spotpris salg": spot_salg,
         "Profit (kr/kWh)": forventet_profit,
         "Reel Profit (kr)": reel_profit,
-        "Afvigelse": afvigelse,
         "KWh handlet": kwh_per_trade
     }
 
@@ -66,18 +67,17 @@ def log_dagens_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid
     df.to_csv(csv_log, index=False)
 
 # ----------- Streamlit UI -----------
-st.title("🔋 Elhandel – Dagligt signal med historik")
+st.title("🔋 Elhandel – Automatisk signal og historik")
 
+# Inputs
 today = dt.date.today()
-
 vind = st.number_input("Vindproduktion (MW)", value=1600)
 forbrug = st.number_input("Forbrug (MW)", value=5100)
 import_mw = st.number_input("Import (MW)", value=150)
 zone = st.selectbox("Priszone", ZONER, index=0)
-køb_tid = st.selectbox("Købstidspunkt", [0, 1, 2, 3, 4, 5, 12, 13, 14], index=3)
-salg_tid = st.selectbox("Salgstidspunkt", [16, 17, 18, 19, 20], index=3)
 
-if st.button("📥 Beregn og log signal"):
+# Beregn
+if st.button("📡 Beregn og log automatisk signal"):
     residual, signal = beregn_signal(vind, forbrug, import_mw)
     st.subheader("📊 Beregning")
     st.write(f"Residual load: **{residual:.0f} MW**")
@@ -85,14 +85,19 @@ if st.button("📥 Beregn og log signal"):
 
     if signal:
         st.success("✅ KØBSSIGNAL registreret")
-        st.markdown(f"- Køb kl. **{køb_tid}:00**, sælg kl. **{salg_tid}:00**")
+        spot_df = hent_spotpriser(today, zone)
+        if not spot_df.empty:
+            køb_tid, salg_tid, spot_køb, spot_salg = vælg_tidspunkter(spot_df)
+            st.markdown(f"- Automatisk valgt køb: **{køb_tid}:00** til **{salg_tid}:00**")
+            st.markdown(f"- Forventet profit: **{spot_salg - spot_køb:.2f} kr/kWh**")
+            log_signal(today, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone)
+            st.success("📁 Signal logget og gemt.")
+        else:
+            st.error("Kunne ikke hente spotpriser fra API.")
     else:
         st.warning("❌ Ingen signal – ingen handel anbefalet")
 
-    log_dagens_signal(today, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, zone)
-    st.success("🔁 Signal logget")
-
-# ----------- Vis historik -----------
+# Vis historik
 if os.path.exists(csv_log):
     st.subheader("📈 Signalhistorik")
     df_hist = pd.read_csv(csv_log)
