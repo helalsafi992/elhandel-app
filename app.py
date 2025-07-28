@@ -55,7 +55,8 @@ def log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_
         "Spotpris salg": spot_salg,
         "Profit (kr/kWh)": forventet_profit,
         "Reel Profit (kr)": reel_profit,
-        "KWh handlet": kwh_per_trade
+        "KWh handlet": kwh_per_trade,
+        "Zone": zone
     }
 
     if os.path.exists(csv_log):
@@ -67,17 +68,19 @@ def log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_
     df.to_csv(csv_log, index=False)
 
 # ----------- Streamlit UI -----------
-st.title("🔋 Elhandel – Automatisk signal og historik")
+st.title("⚡ Elhandel – Automatisk signal & historik")
 
-# Inputs
-today = dt.date.today()
+# 📅 Vælg dato
+dato = st.date_input("📆 Vælg dato for signal", dt.date.today())
+
+# Input
 vind = st.number_input("Vindproduktion (MW)", value=1600)
 forbrug = st.number_input("Forbrug (MW)", value=5100)
 import_mw = st.number_input("Import (MW)", value=150)
 zone = st.selectbox("Priszone", ZONER, index=0)
 
 # Beregn
-if st.button("📡 Beregn og log automatisk signal"):
+if st.button("📡 Beregn og log signal for valgt dato"):
     residual, signal = beregn_signal(vind, forbrug, import_mw)
     st.subheader("📊 Beregning")
     st.write(f"Residual load: **{residual:.0f} MW**")
@@ -85,17 +88,17 @@ if st.button("📡 Beregn og log automatisk signal"):
 
     if signal:
         st.success("✅ KØBSSIGNAL registreret")
-        spot_df = hent_spotpriser(today, zone)
+        spot_df = hent_spotpriser(dato, zone)
         if not spot_df.empty:
             køb_tid, salg_tid, spot_køb, spot_salg = vælg_tidspunkter(spot_df)
-            st.markdown(f"- Automatisk valgt køb: **{køb_tid}:00** til **{salg_tid}:00**")
+            st.markdown(f"- Automatisk valgt køb: **{køb_tid}:00** → salg: **{salg_tid}:00**")
             st.markdown(f"- Forventet profit: **{spot_salg - spot_køb:.2f} kr/kWh**")
-            log_signal(today, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone)
-            st.success("📁 Signal logget og gemt.")
+            log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone)
+            st.success("📁 Signal gemt")
         else:
-            st.error("Kunne ikke hente spotpriser fra API.")
+            st.error("⚠️ Kunne ikke hente spotpriser fra API.")
     else:
-        st.warning("❌ Ingen signal – ingen handel anbefalet")
+        st.warning("❌ Ingen signal – ingen handel")
 
 # Vis historik
 if os.path.exists(csv_log):
