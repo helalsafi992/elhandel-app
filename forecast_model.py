@@ -1,37 +1,45 @@
-import requests
 import pandas as pd
-from datetime import datetime, timedelta
+import datetime as dt
+import requests
 
-# ---------- Position for DK1 (København) ----------
-LAT = 55.6761
-LON = 12.5683
+ZONE = "DK1"
 
-# ---------- YR.NO Vindprognose ----------
-def hent_yrno_wind_forecast():
-    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}"
-    headers = {"User-Agent": "ElhandelApp/1.0 kontakt@dinmail.dk"}
+def hent_vindprognose(dato):
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()["properties"]["timeseries"]
-
-        vinddata = {}
-        for entry in data:
-            tidspunkt = entry["time"]
-            time = datetime.fromisoformat(tidspunkt.replace("Z", "")).hour
-            dato = datetime.fromisoformat(tidspunkt.replace("Z", "")).date()
-            hastighed = entry["data"]["instant"]["details"].get("wind_speed", None)
-            if dato == datetime.utcnow().date() + timedelta(days=1):
-                vinddata[time] = hastighed
-
-        df = pd.Series(vinddata).sort_index().reindex(range(24), fill_value=None)
-        return df.round(1), "live"
-
-    except Exception as e:
-        fallback = pd.Series([2.8]*24, index=range(24))
+        url = f"https://api.energidataservice.dk/dataset/ForeCastWindProduction?start={dato}T00:00&end={dato}T23:59&limit=1000"
+        res = requests.get(url).json()["records"]
+        df = pd.DataFrame(res)
+        df["Hour"] = pd.to_datetime(df["Minutes5UTC"]).dt.hour
+        vind = df.groupby("Hour")[["Offshore", "Onshore"]].mean().sum(axis=1)
+        return vind.round(0), "live"
+    except:
+        fallback = pd.Series([2000]*24, index=range(24))
         return fallback, "fallback"
 
-# ---------- Test (kør kun hvis standalone) ----------
-if __name__ == "__main__":
-    vind, kilde = hent_yrno_wind_forecast()
-    print(f"Kilde: {kilde}")
-    print(vind)
+def hent_forbrugsforecast(dato):
+    try:
+        url = f"https://api.energidataservice.dk/dataset/ConsumptionForecast?start={dato}T00:00&end={dato}T23:59&filter={{\"PriceArea\":[\"{ZONE}\"]}}"
+        res = requests.get(url).json()["records"]
+        df = pd.DataFrame(res)
+        df["Hour"] = pd.to_datetime(df["HourUTC"]).dt.hour
+        forbrug = df.groupby("Hour")["ForecastLoad"].mean()
+        return forbrug.round(0), "live"
+    except:
+        base = 5100
+        pattern = [0.85,0.80,0.75,0.73,0.75,0.78,0.85,0.95,1.00,1.05,1.10,1.12,
+                   1.15,1.10,1.05,1.00,1.02,1.04,1.00,0.95,0.90,0.85,0.83,0.80]
+        fallback = pd.Series([int(base * p) for p in pattern], index=range(24))
+        return fallback, "fallback"
+
+def hent_importforecast(dato):
+    try:
+        url = f"https://api.energidataservice.dk/dataset/NetExchange?start={dato}T00:00&end={dato}T23:59&filter={{\"PriceArea\":[\"{ZONE}\"]}}"
+        res = requests.get(url).json()["records"]
+        df = pd.DataFrame(res)
+        df["Hour"] = pd.to_datetime(df["HourUTC"]).dt.hour
+        df_pos = df[df["Exchange"] > 0]
+        imp = df_pos.groupby("Hour")["Exchange"].mean().round(0)
+        return imp, "live"
+    except:
+        fallback = pd.Series([150]*24, index=range(24))
+        return fallback, "fallback"
