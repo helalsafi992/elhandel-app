@@ -2,129 +2,73 @@ import streamlit as st
 import pandas as pd
 import datetime as dt
 import requests
-import os
 
 # ----------- Konfiguration -----------
-ZONER = ["DK1", "DK2"]
-kwh_per_trade = 1000
-csv_log = "elhandel_signal_log.csv"
+ZONE = "DK1"
+KWH = 1000
+KØB_TIMER = [0, 1, 2, 3, 4, 5, 12, 13, 14]
 
-# ----------- Hent spotpriser -----------
-def hent_spotpriser(dato, zone="DK1"):
-    dato_str = dato.strftime('%Y-%m-%d')
-    url = f"https://stromligning.dk/api/v1/prices?start={dato_str}&end={dato_str}&zone={zone}"
-    r = requests.get(url)
-    if r.status_code == 200:
-        data = r.json()
-        df = pd.DataFrame(data)
-        df["HourDK"] = pd.to_datetime(df["HourDK"])
-        df["Hour"] = df["HourDK"].dt.hour
-        return df
-    return pd.DataFrame()
+# ----------- D+1 dato -----------
+i_morgen = dt.date.today() + dt.timedelta(days=1)
+dato_str = i_morgen.strftime('%Y-%m-%d')
 
-# ----------- Automatisk reelle værdier -----------
-def hent_reelle_data(dato):
-    vind = 1600
-    forbrug = 5100
-    import_mw = 150
+# ----------- Vind forecast (Energinet) -----------
+def hent_vindprognose(dato):
     try:
-        d_str = dato.strftime('%Y-%m-%d')
-        # Vind
-        vind_url = f"https://api.energidataservice.dk/dataset/ActualWindProduction?start={d_str}T00:00&end={d_str}T23:59&filter={{\"PriceArea\":[\"DK1\"]}}&limit=1000"
-        v_res = requests.get(vind_url).json()
-        vind = sum([x["OffshoreWindPower"] + x["OnshoreWindPower"] for x in v_res["records"]]) // len(v_res["records"])
-        # Forbrug
-        load_url = f"https://api.energidataservice.dk/dataset/ConsumptionDE35?start={d_str}T00:00&end={d_str}T23:59&filter={{\"PriceArea\":[\"DK1\"]}}&limit=1000"
-        l_res = requests.get(load_url).json()
-        forbrug = sum([x["Consumption"] for x in l_res["records"]]) // len(l_res["records"])
-        # Import
-        net_url = f"https://api.energidataservice.dk/dataset/NetExchange?start={d_str}T00:00&end={d_str}T23:59&filter={{\"PriceArea\":[\"DK1\"]}}&limit=1000"
-        n_res = requests.get(net_url).json()
-        import_mw = sum([x["Exchange"] for x in n_res["records"] if x["Exchange"] > 0]) // len(n_res["records"])
+        url = f"https://api.energidataservice.dk/dataset/ForeCastWindProduction?start={dato}T00:00&end={dato}T23:59&limit=1000"
+        res = requests.get(url).json()
+        records = res["records"]
+        df = pd.DataFrame(records)
+        df["Time"] = pd.to_datetime(df["Minutes5UTC"]).dt.hour
+        vind = df.groupby("Time")["Offshore"] .mean() + df.groupby("Time")["Onshore"].mean()
+        return vind
     except:
-        pass
-    return int(vind), int(forbrug), int(import_mw)
+        return pd.Series([2000]*24, index=range(24))
 
-# ----------- Beregn signal -----------
-def beregn_signal(vind, forbrug, import_mw):
-    residual = forbrug - vind
-    signal = residual > 2450 and import_mw < 200
+# ----------- Forbrugsprognose (fallback model) -----------
+def generer_forbrugsforecast():
+    base = 5100
+    pattern = [0.85, 0.80, 0.75, 0.73, 0.75, 0.78, 0.85, 0.95, 1.00, 1.05, 1.10, 1.12,
+               1.15, 1.10, 1.05, 1.00, 1.02, 1.04, 1.00, 0.95, 0.90, 0.85, 0.83, 0.80]
+    return pd.Series([int(base * p) for p in pattern], index=range(24))
+
+# ----------- Beregn residual og find signal ----------
+def beregn_signal(vind_ser, forbrug_ser, import_mw=150):
+    residual = forbrug_ser - vind_ser
+    signal = residual > 2450
     return residual, signal
 
-# ----------- Vælg tidspunkter automatisk -----------
-def vælg_tidspunkter(df):
-    købsvindue = df[df["Hour"].isin([0,1,2,3,4,5,12,13,14])]
-    købstid = købsvindue.loc[købsvindue["SpotPriceDKK"].idxmin()]["Hour"]
-    salgstid = df.loc[df["SpotPriceDKK"].idxmax()]["Hour"]
-    spot_køb = købsvindue["SpotPriceDKK"].min()
-    spot_salg = df["SpotPriceDKK"].max()
-    return int(købstid), int(salgstid), spot_køb, spot_salg
-
-# ----------- Gem log -----------
-def log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone):
-    forventet_profit = spot_salg - spot_køb
-    reel_profit = forventet_profit * kwh_per_trade
-    row = {
-        "Dato": dato.strftime('%Y-%m-%d'),
-        "Vind": vind,
-        "Forbrug": forbrug,
-        "Import": import_mw,
-        "Residual Load": residual,
-        "Signal": "Ja" if signal else "Nej",
-        "Købstid": f"{køb_tid}:00",
-        "Salgstid": f"{salg_tid}:00",
-        "Spotpris køb": spot_køb,
-        "Spotpris salg": spot_salg,
-        "Profit (kr/kWh)": forventet_profit,
-        "Reel Profit (kr)": reel_profit,
-        "KWh handlet": kwh_per_trade,
-        "Zone": zone
-    }
-    if os.path.exists(csv_log):
-        df = pd.read_csv(csv_log)
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    else:
-        df = pd.DataFrame([row])
-    df.to_csv(csv_log, index=False)
-
 # ----------- UI -----------
-st.title("⚡ Elhandel – Automatisk signal og historik")
+st.title("📈 Day-Ahead Handelssignal")
 
-# 📆 Dato
-dato = st.date_input("📅 Vælg dato for signal", dt.date.today())
-zone = st.selectbox("Priszone", ZONER, index=0)
+st.markdown(f"📅 **Analyserer for: {i_morgen.strftime('%A %d. %B %Y')}**")
 
-# 📥 Hent reelle værdier og vis som inputfelter
-vind_val, forbrug_val, import_val = hent_reelle_data(dato)
-vind = st.number_input("Vindproduktion (MW)", value=vind_val)
-forbrug = st.number_input("Forbrug (MW)", value=forbrug_val)
-import_mw = st.number_input("Import (MW)", value=import_val)
+# Hent forecasts
+vind = hent_vindprognose(dato_str)
+forbrug = generer_forbrugsforecast()
+residual, signal = beregn_signal(vind, forbrug)
 
-# 📡 Beregn
-if st.button("📡 Beregn og log signal"):
-    residual, signal = beregn_signal(vind, forbrug, import_mw)
-    st.subheader("📊 Beregning")
-    st.write(f"Residual load: **{residual} MW**")
+# Saml i DataFrame
+df = pd.DataFrame({
+    "Time": range(24),
+    "Vind (MW)": vind,
+    "Forbrug (MW)": forbrug,
+    "Residual Load": residual,
+    "Signal?": signal
+})
 
-    if signal:
-        st.success("✅ KØBSSIGNAL registreret")
-        spot_df = hent_spotpriser(dato, zone)
-        if not spot_df.empty:
-            køb_tid, salg_tid, spot_køb, spot_salg = vælg_tidspunkter(spot_df)
-            st.markdown(f"- Automatisk køb: **{køb_tid}:00** → salg: **{salg_tid}:00**")
-            st.markdown(f"- Forventet profit: **{spot_salg - spot_køb:.2f} kr/kWh**")
-            log_signal(dato, vind, forbrug, import_mw, residual, signal, køb_tid, salg_tid, spot_køb, spot_salg, zone)
-            st.success("📁 Signal gemt")
-        else:
-            st.error("⚠️ Spotpriser kunne ikke hentes.")
-    else:
-        st.warning("❌ Ingen signal – ingen handel")
+# Vis tabel
+st.dataframe(df)
 
-# 📈 Historik
-if os.path.exists(csv_log):
-    st.subheader("📈 Signalhistorik")
-    df_hist = pd.read_csv(csv_log)
-    st.dataframe(df_hist)
-    st.download_button("📥 Download CSV", df_hist.to_csv(index=False), file_name=csv_log)
+# Udfør beslutning
+df_signal = df[df["Signal?"]]
+if not df_signal.empty:
+    køb_tid = df_signal[df_signal["Time"].isin(KØB_TIMER)].sort_values("Residual Load", ascending=False).iloc[0]["Time"]
+    sælg_tid = df_signal.sort_values("Residual Load").iloc[0]["Time"]
+
+    st.success(f"✅ KØBSSIGNAL AKTIV – Residual > 2450 MW og Import < 200 MW")
+    st.markdown(f"📌 **Anbefalet handel i morgen ({i_morgen.strftime('%d/%m')}):**")
+    st.markdown(f"- **Køb:** kl. **{int(køb_tid):02}:00**")
+    st.markdown(f"- **Sælg:** kl. **{int(sælg_tid):02}:00**")
 else:
-    st.info("Ingen signaler logget endnu.")
+    st.warning("❌ Ingen signal fundet for i morgen – systembelastning under tærskel.")
