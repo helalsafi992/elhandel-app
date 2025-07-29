@@ -3,36 +3,19 @@ import pandas as pd
 import datetime as dt
 import requests
 
-# ----------- Konfiguration -----------
-ZONER = ["DK1", "DK2"]
+# ---------- Konfiguration ----------
 zone = "DK1"
-kwh_per_trade = 1000
 
-# ----------- Hent senest gyldig dato med data -----------
+# ---------- Hent senest gyldig dato med data ----------
 def find_seneste_dato(max_dage=10):
     for i in range(max_dage):
         dato = dt.date.today() - dt.timedelta(days=i)
         vind, forbrug, imp = hent_reelle_data(dato)
-        priser = hent_spotpriser(dato, zone)
-        if vind > 0 and forbrug > 0 and imp >= 0 and not priser.empty:
+        if vind > 0 and forbrug > 0 and imp >= 0:
             return dato
     return None
 
-# ----------- Hent spotpriser -----------
-def hent_spotpriser(dato, zone="DK1"):
-    try:
-        url = f"https://stromligning.dk/api/v1/prices?start={dato}&end={dato}&zone={zone}"
-        r = requests.get(url)
-        if r.status_code == 200:
-            df = pd.DataFrame(r.json())
-            df["HourDK"] = pd.to_datetime(df["HourDK"])
-            df["Hour"] = df["HourDK"].dt.hour
-            return df
-    except:
-        pass
-    return pd.DataFrame()
-
-# ----------- Hent reelle værdier -----------
+# ---------- Hent reelle værdier ----------
 def hent_reelle_data(dato):
     vind = 0
     forbrug = 0
@@ -55,29 +38,18 @@ def hent_reelle_data(dato):
         pass
     return int(vind), int(forbrug), int(imp)
 
-# ----------- Beregn signal -----------
+# ---------- Beregn signal ----------
 def beregn_signal(vind, forbrug, imp):
     residual = forbrug - vind
     return residual, residual > 2450 and imp < 200
 
-# ----------- Find bedste køb/salg ----------
-def vælg_tidspunkter(df):
-    købsvindue = df[df["Hour"].isin([0,1,2,3,4,5,12,13,14])]
-    købstid = købsvindue.loc[købsvindue["SpotPriceDKK"].idxmin()]["Hour"]
-    salgstid = df.loc[df["SpotPriceDKK"].idxmax()]["Hour"]
-    spot_køb = købsvindue["SpotPriceDKK"].min()
-    spot_salg = df["SpotPriceDKK"].max()
-    return int(købstid), int(salgstid), spot_køb, spot_salg
+# ---------- UI ----------
+st.title("⚡ Live Elhandel – Signal uden spotpriser")
 
-# ----------- UI -----------
-st.title("⚡ Live Elhandel – Automatisk signal")
-
-# Start
 dato = find_seneste_dato()
 
 if dato:
     vind, forbrug, imp = hent_reelle_data(dato)
-    spot_df = hent_spotpriser(dato, zone)
     residual, signal = beregn_signal(vind, forbrug, imp)
 
     st.markdown(f"📅 **Signal beregnet for: {dato.strftime('%d. %B %Y')}**")
@@ -87,18 +59,8 @@ if dato:
     st.markdown(f"- Residual Load: **{residual} MW**")
 
     if signal:
-        st.success("✅ KØBSSIGNAL registreret")
-        if not spot_df.empty:
-            køb_tid, salg_tid, spot_køb, spot_salg = vælg_tidspunkter(spot_df)
-            profit = spot_salg - spot_køb
-            kr = profit * kwh_per_trade
-            st.markdown(f"- Køb kl. **{køb_tid}:00**, sælg kl. **{salg_tid}:00**")
-            st.markdown(f"- Forventet profit: **{profit:.2f} kr/kWh** ({kr:.0f} kr for 1000 kWh)")
-        else:
-            st.warning("⚠️ Spotpriser ikke fundet – signal vist uden prisberegning.")
+        st.success("✅ KØBSSIGNAL registreret (baseret på logik)")
     else:
         st.warning("❌ Intet købssignal – betingelser ikke opfyldt.")
-
 else:
-    st.error("🚫 Ingen gyldig dag med både reelle data og spotpriser kunne findes.")
-    st.info("Tjek internet, API eller prøv igen senere.")
+    st.error("🚫 Ingen gyldig dag med data kunne findes.")
